@@ -1,0 +1,4 @@
+pyTelegramBotAPI
+supabase
+pillow
+Flask
