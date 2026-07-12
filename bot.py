@@ -1,45 +1,39 @@
 import os
-import threading
-
 import telebot
+from telebot import apihelper
 from supabase import create_client, Client
 from flask import Flask
+import threading
 
-# ==========================
-# Environment Variables
-# ==========================
+# تغییر مسیر حیاتی: اتصال به سرورهای پیام‌رسان بله به جای تلگرام برای رفع خطای 401
+apihelper.API_URL = "https://tapi.bale.ai/bot{0}/{1}"
+
+# خواندن امن کلیدها از متغیرهای محیطی
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+# راه‌اندازی ربات و دیتابیس
 bot = telebot.TeleBot(BOT_TOKEN)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==========================
-# Flask App
-# ==========================
+# ساخت یک سرور مجازی (Flask) برای جلوگیری از به خواب رفتن سرور رایگان رندر
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "ربات دیوان بخت‌زاده فعال است."
+@app.route('/')
+def index():
+    return "ربات دیوان بخت‌زاده با موفقیت به پیام‌رسان بله متصل شد و فعال است."
 
-# ==========================
-# Bale Bot Commands
-# ==========================
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.reply_to(
-        message,
-        "سلام جناب بخت‌زاده عزیز؛ به دیوان دیجیتال خود خوش آمدید. 🌷"
-    )
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "سلام جناب بخت‌زاده عزیز؛ به دیوان دیجیتال خود خوش آمدید. 🌷")
 
-# ==========================
-# Run Bot
-# ==========================
 def run_bot():
+    # استفاده از skip_pending برای جلوگیری از کرش کردن ربات به دلیل پیام‌های انباشته شده قدیمی
     bot.infinity_polling(skip_pending=True)
 
-# اجرای ربات فقط یکبار هنگام بالا آمدن Gunicorn
-thread = threading.Thread(target=run_bot, daemon=True)
-thread.start()
+if __name__ == "__main__":
+    # اجرای همزمان و بدون تداخلِ ربات پیام‌رسان و سرور بیدارباش
+    threading.Thread(target=run_bot, daemon=True).start()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
