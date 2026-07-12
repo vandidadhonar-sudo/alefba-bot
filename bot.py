@@ -15,8 +15,20 @@ from supabase import create_client
 apihelper.API_URL = "https://tapi.bale.ai/bot{0}/{1}"
 
 BOT_TOKEN     = os.getenv("BOT_TOKEN")
-SUPABASE_URL  = os.getenv("SUPABASE_URL")
 SUPABASE_KEY  = os.getenv("SUPABASE_KEY")
+
+
+def _clean_supabase_url(raw):
+    """کتابخانه فقط به آدرس پایه نیاز دارد؛ اگر کسی اشتباهاً /rest/v1 را هم
+    اضافه کرده باشد، اینجا پاک می‌شود تا مسیر دوبار تکرار نشود."""
+    url = (raw or "").strip().rstrip("/")
+    for suffix in ("/rest/v1", "/rest"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
+
+
+SUPABASE_URL = _clean_supabase_url(os.getenv("SUPABASE_URL"))
 # رمزها فقط از متغیرهای محیطی رندر خوانده می‌شوند (در کد ذخیره نمی‌شوند)
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 POET_PASSWORD  = os.getenv("POET_PASSWORD")
