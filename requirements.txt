@@ -4,3 +4,4 @@ pyTelegramBotAPI
 supabase
 Pillow
 jdatetime
+requests

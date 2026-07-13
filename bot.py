@@ -1,11 +1,15 @@
 import os
+import io
 import time
+import uuid
 import threading
 
+import requests
 import telebot
 from telebot import apihelper, types
 from flask import Flask
 import jdatetime
+from PIL import Image, ImageOps
 from supabase import create_client
 
 # ---------------------------------------------------------------------------
@@ -489,6 +493,219 @@ def cmd_start(m):
         )
 
 
+# ---------------------------------------------------------------------------
+#  بخش رسانه: خطاطی (عکس) و آوا (صدا)
+# ---------------------------------------------------------------------------
+VOICE_OK = "✅ تأیید صدا"
+VOICE_REDO = "🎙 ضبط مجدد"
+
+
+def media_confirm_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(BTN_CONFIRM)
+    kb.row(BTN_RESTART)
+    kb.row(BTN_HOME)
+    return kb
+
+
+def voice_review_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(VOICE_OK, VOICE_REDO)
+    kb.row(BTN_HOME)
+    return kb
+
+
+def download_bale_file(file_id):
+    """فایل را از سرور بله دانلود می‌کند و بایت‌هایش را برمی‌گرداند."""
+    info = bot.get_file(file_id)
+    url = "https://tapi.bale.ai/file/bot{0}/{1}".format(BOT_TOKEN, info.file_path)
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def process_and_upload_image(data_bytes):
+    """اصلاح خودکار زاویه (EXIF)، تشخیص افقی/عمودی، بهینه‌سازی WebP و آپلود."""
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data_bytes))).convert("RGB")
+    w, h = img.size
+    orientation = "landscape" if w >= h else "portrait"
+    maxd = 1600
+    if max(w, h) > maxd:
+        s = maxd / float(max(w, h))
+        img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", quality=85, method=6)
+    path = "calligraphy/{0}.webp".format(uuid.uuid4().hex)
+    supabase.storage.from_("images").upload(path, buf.getvalue(), {"content-type": "image/webp"})
+    return supabase.storage.from_("images").get_public_url(path), orientation
+
+
+def upload_voice(data_bytes, ext, ctype):
+    path = "voice/{0}.{1}".format(uuid.uuid4().hex, ext)
+    supabase.storage.from_("audio").upload(path, data_bytes, {"content-type": ctype})
+    return supabase.storage.from_("audio").get_public_url(path)
+
+
+def start_image_wizard(chat_id):
+    STATE[chat_id] = {"step": "img_wait_photo", "data": {"type": "calligraphy", "author": PEN_ALEFBA}}
+    bot.send_message(
+        chat_id,
+        "🖼 لطفاً عکس خطاطی یا دست‌نوشته را بفرستید.\n(زاویه و کیفیت را خودم خودکار اصلاح می‌کنم.)",
+        reply_markup=back_keyboard(),
+    )
+
+
+def start_voice_wizard(chat_id):
+    STATE[chat_id] = {"step": "voice_wait_audio", "data": {"type": "voice", "author": PEN_ALEFBA}}
+    bot.send_message(
+        chat_id,
+        "🎤 لطفاً دکلمه را بفرستید — می‌توانید همین‌جا در بله مستقیم ضبط کنید و بفرستید.",
+        reply_markup=back_keyboard(),
+    )
+
+
+def show_media_preview(chat_id, data):
+    if data.get("type") == "calligraphy":
+        cap = "🖼 پیش‌نمایش خطاطی\nعنوان: " + (data.get("title") or "—")
+        if data.get("content"):
+            cap += "\nتوضیح: " + data["content"]
+        fid = data.get("photo_file_id")
+        try:
+            if fid:
+                bot.send_photo(chat_id, fid, caption=cap)
+            else:
+                bot.send_message(chat_id, cap)
+        except Exception:
+            bot.send_message(chat_id, cap)
+        bot.send_message(chat_id, "اگر درست است «✅ تأیید و انتشار» را بزنید.", reply_markup=media_confirm_keyboard())
+    else:
+        cap = "🎤 پیش‌نمایش آوا\nعنوان: " + (data.get("title") or "—")
+        if data.get("content"):
+            cap += "\nتوضیح: " + data["content"]
+        fid = data.get("voice_file_id")
+        try:
+            if fid:
+                bot.send_voice(chat_id, fid)
+        except Exception:
+            pass
+        bot.send_message(chat_id, cap + "\n\nاگر درست است «✅ تأیید و انتشار» را بزنید.", reply_markup=media_confirm_keyboard())
+
+
+def publish_media(chat_id, data, role):
+    record = {
+        "type": data.get("type"),
+        "title": data.get("title"),
+        "content": data.get("content"),
+        "author": data.get("author") or PEN_ALEFBA,
+        "image_url": data.get("image_url"),
+        "image_orientation": data.get("image_orientation"),
+        "audio_url": data.get("audio_url"),
+        "persian_date": jdatetime.date.today().strftime("%Y/%m/%d"),
+        "status": "published",
+        "submitted_by_chat_id": chat_id,
+    }
+    try:
+        supabase.table("artworks").insert(record).execute()
+    except Exception as e:
+        print("publish media error:", e)
+        bot.send_message(chat_id, "متأسفانه در ثبت خطایی رخ داد. کمی بعد دوباره تلاش کنید.", reply_markup=main_keyboard(role))
+        return
+    STATE.pop(chat_id, None)
+    kind = "خطاطی" if data.get("type") == "calligraphy" else "آوا"
+    bot.send_message(chat_id, "✅ {0} شما با موفقیت در سایت منتشر شد. سپاس از شما جناب بخت‌زاده. 🌹".format(kind), reply_markup=main_keyboard(role))
+    if role == "poet":
+        notify_admins(data)
+
+
+def handle_image_photo(chat_id, m, st, role):
+    bot.send_message(chat_id, "در حال پردازش عکس… لحظه‌ای صبر کنید 🌿")
+    try:
+        file_id = m.photo[-1].file_id
+        data_bytes = download_bale_file(file_id)
+        url, orientation = process_and_upload_image(data_bytes)
+    except Exception as e:
+        print("image process error:", e)
+        bot.send_message(chat_id, "متأسفانه در دریافت عکس خطایی رخ داد. دوباره بفرستید یا «🏠 بازگشت به منو».", reply_markup=back_keyboard())
+        return
+    st["data"]["image_url"] = url
+    st["data"]["image_orientation"] = orientation
+    st["data"]["photo_file_id"] = file_id
+    st["step"] = "img_wait_title"
+    bot.send_message(chat_id, "عکس دریافت و بهینه شد ✅\nعنوان این خطاطی را بنویسید (اگر ندارد: بدون عنوان):", reply_markup=back_keyboard())
+
+
+def handle_voice_audio(chat_id, m, st, role):
+    bot.send_message(chat_id, "در حال دریافت صدا… 🌿")
+    try:
+        if m.content_type == "voice":
+            file_id, ext, ctype = m.voice.file_id, "ogg", "audio/ogg"
+        else:
+            file_id, ext, ctype = m.audio.file_id, "mp3", "audio/mpeg"
+        data_bytes = download_bale_file(file_id)
+        url = upload_voice(data_bytes, ext, ctype)
+    except Exception as e:
+        print("voice process error:", e)
+        bot.send_message(chat_id, "متأسفانه در دریافت صدا خطایی رخ داد. دوباره بفرستید یا «🏠 بازگشت به منو».", reply_markup=back_keyboard())
+        return
+    st["data"]["audio_url"] = url
+    st["data"]["voice_file_id"] = file_id
+    st["step"] = "voice_review"
+    try:
+        bot.send_voice(chat_id, file_id)
+    except Exception:
+        pass
+    bot.send_message(chat_id, "صدا دریافت شد. یک‌بار گوش کنید:\nاگر خوب است «✅ تأیید صدا»، وگرنه «🎙 ضبط مجدد».", reply_markup=voice_review_keyboard())
+
+
+def handle_media_wizard(chat_id, text, st, role):
+    step = st["step"]
+    data = st["data"]
+
+    if step == "img_wait_photo":
+        bot.send_message(chat_id, "لطفاً یک «عکس» خطاطی بفرستید.", reply_markup=back_keyboard())
+    elif step == "img_wait_title":
+        data["title"] = text
+        st["step"] = "img_wait_desc"
+        bot.send_message(chat_id, "توضیح کوتاه (اختیاری). اگر نمی‌خواهید، بنویسید «ندارد».", reply_markup=back_keyboard())
+    elif step == "img_wait_desc":
+        data["content"] = None if text in ("ندارد", "-", "نه") else text
+        st["step"] = "img_preview"
+        show_media_preview(chat_id, data)
+    elif step == "img_preview":
+        if text == BTN_CONFIRM:
+            publish_media(chat_id, data, role)
+        elif text == BTN_RESTART:
+            start_image_wizard(chat_id)
+        else:
+            show_media_preview(chat_id, data)
+
+    elif step == "voice_wait_audio":
+        bot.send_message(chat_id, "لطفاً یک «فایل صوتی» یا ویس بفرستید.", reply_markup=back_keyboard())
+    elif step == "voice_review":
+        if text == VOICE_OK:
+            st["step"] = "voice_wait_title"
+            bot.send_message(chat_id, "عنوان این آوا را بنویسید:", reply_markup=back_keyboard())
+        elif text == VOICE_REDO:
+            start_voice_wizard(chat_id)
+        else:
+            bot.send_message(chat_id, "«✅ تأیید صدا» یا «🎙 ضبط مجدد» را انتخاب کنید.", reply_markup=voice_review_keyboard())
+    elif step == "voice_wait_title":
+        data["title"] = text
+        st["step"] = "voice_wait_desc"
+        bot.send_message(chat_id, "چند خط توضیح برای این آوا بنویسید (اختیاری). اگر نمی‌خواهید، «ندارد».", reply_markup=back_keyboard())
+    elif step == "voice_wait_desc":
+        data["content"] = None if text in ("ندارد", "-", "نه") else text
+        st["step"] = "voice_preview"
+        show_media_preview(chat_id, data)
+    elif step == "voice_preview":
+        if text == BTN_CONFIRM:
+            publish_media(chat_id, data, role)
+        elif text == BTN_RESTART:
+            start_voice_wizard(chat_id)
+        else:
+            show_media_preview(chat_id, data)
+
+
 @bot.message_handler(content_types=["photo", "voice", "audio", "document", "video"])
 def on_media(m):
     chat_id = m.chat.id
@@ -496,10 +713,26 @@ def on_media(m):
     if role is None:
         bot.send_message(chat_id, "ابتدا با زدن /start و وارد کردن رمز، وارد شوید.")
         return
+    st = STATE.get(chat_id)
+    step = st.get("step", "") if st else ""
+
+    if m.content_type == "photo" and step == "img_wait_photo":
+        handle_image_photo(chat_id, m, st, role)
+        return
+    if m.content_type in ("voice", "audio") and step == "voice_wait_audio":
+        handle_voice_audio(chat_id, m, st, role)
+        return
+
+    if step == "img_wait_photo":
+        bot.send_message(chat_id, "لطفاً یک «عکس» خطاطی بفرستید.", reply_markup=back_keyboard())
+        return
+    if step == "voice_wait_audio":
+        bot.send_message(chat_id, "لطفاً یک «فایل صوتی» یا ویس بفرستید.", reply_markup=back_keyboard())
+        return
+
     bot.send_message(
         chat_id,
-        "🌱 بخش «خطاطی» و «دکلمه» در گام بعدی به‌زودی فعال می‌شود.\n"
-        "فعلاً می‌توانید شعر خود را از طریق «✍️ ارسال شعر جدید» ثبت کنید.",
+        "برای ارسال خطاطی یا دکلمه، اول از منوی پایین دکمهٔ مربوطه را بزنید. 🌸",
         reply_markup=main_keyboard(role),
     )
 
@@ -534,17 +767,19 @@ def on_text(m):
         if step.startswith("poem_") or step.startswith("edit_"):
             handle_poem_wizard(chat_id, text, st, role)
             return
+        if step.startswith("img_") or step.startswith("voice_"):
+            handle_media_wizard(chat_id, text, st, role)
+            return
 
     # انتخاب از منوی اصلی
     if text == BTN_POEM:
         start_poem_wizard(chat_id)
         return
-    if text in (BTN_VOICE, BTN_IMAGE):
-        bot.send_message(
-            chat_id,
-            "🌱 این بخش در گام بعدی به‌زودی فعال می‌شود.",
-            reply_markup=main_keyboard(role),
-        )
+    if text == BTN_IMAGE:
+        start_image_wizard(chat_id)
+        return
+    if text == BTN_VOICE:
+        start_voice_wizard(chat_id)
         return
     if role == "admin" and text == BTN_ADMIN_RECENT:
         admin_recent(chat_id, role)
