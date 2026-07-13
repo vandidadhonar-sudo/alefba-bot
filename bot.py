@@ -631,6 +631,17 @@ def health():
     return "ok", 200
 
 
+@app.route("/keepalive")
+def keepalive():
+    """با یک پینگ بیرونی هر چند دقیقه، هم رندر بیدار می‌ماند و هم
+    با یک خواندنِ سبک، دیتابیس ساببیس به خواب (Pause) نمی‌رود."""
+    try:
+        supabase.table("artworks").select("id").limit(1).execute()
+    except Exception as e:
+        print("keepalive db touch error:", e)
+    return "alive", 200
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
