@@ -856,6 +856,21 @@ def run_bot():
 threading.Thread(target=run_bot, daemon=True).start()
 
 
+def self_heartbeat():
+    """ضربانِ داخلی: تا وقتی ربات روشن است، هر ۱۰ دقیقه خودش را صدا می‌زند
+    تا سرور بیدار بماند (بیمهٔ مضاعف در کنار پینگ بیرونی)."""
+    url = os.getenv("SELF_URL", "https://alefba-bot.onrender.com/keepalive")
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(url, timeout=20)
+        except Exception as e:
+            print("self-heartbeat error:", e)
+
+
+threading.Thread(target=self_heartbeat, daemon=True).start()
+
+
 @app.route("/")
 def index():
     return "سرور بیدارباشِ ربات دیوان الف ب فعال است."
