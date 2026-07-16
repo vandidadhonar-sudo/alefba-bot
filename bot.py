@@ -63,6 +63,12 @@ BTN_CONFIRM = "✅ تأیید و انتشار"
 BTN_EDIT    = "✏️ ویرایش"
 BTN_RESTART = "🔄 از نو"
 
+BTN_READ   = "🎙 خواندنِ شعر با صدا"
+READ_OK    = "✅ بله، درست است"
+READ_REDO  = "🔁 دوباره می‌خوانم"
+VOICE_YES  = "✅ بله، صدای من هم باشد"
+VOICE_NO   = "❌ فقط متنِ شعر"
+
 EDIT_TEXT  = "✏️ متن شعر"
 EDIT_TITLE = "✏️ عنوان"
 EDIT_PEN   = "✏️ تخلص"
@@ -107,11 +113,13 @@ def set_role(chat_id, role):
 # ---------------------------------------------------------------------------
 def main_keyboard(role):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(BTN_READ)
     kb.row(BTN_POEM)
     kb.row(BTN_VOICE)
     kb.row(BTN_IMAGE)
     if role == "admin":
-        kb.row(BTN_ADMIN_RECENT, BTN_ADMIN_SEARCH)
+        kb.row(BTN_ADMIN_RECENT)
+        kb.row(BTN_ADMIN_SEARCH)
     kb.row(BTN_HELP)
     return kb
 
@@ -124,7 +132,8 @@ def back_keyboard():
 
 def pen_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(PEN_ALEFBA, PEN_SABA)
+    kb.row(PEN_ALEFBA)
+    kb.row(PEN_SABA)
     kb.row(PEN_OTHER)
     kb.row(BTN_HOME)
     return kb
@@ -139,8 +148,8 @@ def date_keyboard():
 
 def category_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(CATEGORIES[0], CATEGORIES[1])
-    kb.row(CATEGORIES[2], CATEGORIES[3])
+    for c in CATEGORIES:
+        kb.row(c)
     kb.row(BTN_HOME)
     return kb
 
@@ -148,15 +157,18 @@ def category_keyboard():
 def confirm_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(BTN_CONFIRM)
-    kb.row(BTN_EDIT, BTN_RESTART)
+    kb.row(BTN_EDIT)
+    kb.row(BTN_RESTART)
     kb.row(BTN_HOME)
     return kb
 
 
 def edit_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(EDIT_TEXT, EDIT_TITLE)
-    kb.row(EDIT_PEN, EDIT_DATE)
+    kb.row(EDIT_TEXT)
+    kb.row(EDIT_TITLE)
+    kb.row(EDIT_PEN)
+    kb.row(EDIT_DATE)
     kb.row(EDIT_CAT)
     kb.row(EDIT_BACK)
     kb.row(BTN_HOME)
@@ -235,6 +247,8 @@ def publish_poem(chat_id, data, role):
         "composed_at_text": data.get("composed_at_text"),
         "status":   "published",
     }
+    if data.get("audio_url"):
+        record["audio_url"] = data["audio_url"]
     try:
         if is_edit:
             supabase.table("artworks").update(record).eq("id", data["edit_id"]).execute()
@@ -325,7 +339,11 @@ def handle_poem_wizard(chat_id, text, st, role):
 
     elif step == "poem_preview":
         if text == BTN_CONFIRM:
-            publish_poem(chat_id, data, role)
+            if data.get("audio_url"):
+                st["step"] = "poem_ask_voice"
+                bot.send_message(chat_id, "صدای خوانشِ شما هم زیرِ شعر در سایت منتشر شود؟", reply_markup=ask_voice_keyboard())
+            else:
+                publish_poem(chat_id, data, role)
         elif text == BTN_EDIT:
             st["step"] = "poem_edit_menu"
             bot.send_message(chat_id, "کدام بخش را می‌خواهید اصلاح کنید؟", reply_markup=edit_keyboard())
@@ -333,6 +351,15 @@ def handle_poem_wizard(chat_id, text, st, role):
             start_poem_wizard(chat_id)
         else:
             show_preview(chat_id, data)
+
+    elif step == "poem_ask_voice":
+        if text == VOICE_YES:
+            publish_poem(chat_id, data, role)
+        elif text == VOICE_NO:
+            data.pop("audio_url", None)
+            publish_poem(chat_id, data, role)
+        else:
+            bot.send_message(chat_id, "یکی از گزینه‌ها را انتخاب کنید:", reply_markup=ask_voice_keyboard())
 
     elif step == "poem_edit_menu":
         if text == EDIT_BACK:
@@ -706,6 +733,135 @@ def handle_media_wizard(chat_id, text, st, role):
             show_media_preview(chat_id, data)
 
 
+# ---------------------------------------------------------------------------
+#  خواندنِ شعر با صدا (صدا → متن) با چند سرویسِ پشتیبان و تورِ نجات
+# ---------------------------------------------------------------------------
+def ask_voice_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(VOICE_YES)
+    kb.row(VOICE_NO)
+    kb.row(BTN_HOME)
+    return kb
+
+
+def read_review_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(READ_OK)
+    kb.row(READ_REDO)
+    kb.row(BTN_HOME)
+    return kb
+
+
+def _stt_groq(data_bytes, ext):
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        return None
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer " + key},
+            files={"file": ("audio." + ext, data_bytes)},
+            data={"model": "whisper-large-v3-turbo", "language": "fa",
+                  "response_format": "text", "prompt": "این یک شعرِ فارسی است."},
+            timeout=90,
+        )
+        if r.status_code == 200:
+            return (r.text or "").strip()
+        print("groq stt:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("groq stt exc:", e)
+    return None
+
+
+def _stt_gemini(data_bytes, ext):
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        return None
+    try:
+        import base64
+        mime = {"ogg": "audio/ogg", "mp3": "audio/mpeg", "m4a": "audio/mp4"}.get(ext, "audio/ogg")
+        body = {"contents": [{"parts": [
+            {"text": "این فایلِ صوتی خوانشِ یک شعرِ فارسی است. فقط متنِ دقیقِ شعر را خط‌به‌خط بنویس؛ بدون هیچ توضیحِ اضافه."},
+            {"inline_data": {"mime_type": mime, "data": base64.b64encode(data_bytes).decode()}}]}]}
+        r = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + key,
+            json=body, timeout=90)
+        if r.status_code == 200:
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        print("gemini stt:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("gemini stt exc:", e)
+    return None
+
+
+def transcribe_poem(data_bytes, ext):
+    """چند سرویس پشتِ هم؛ متنِ شعر یا None برمی‌گرداند."""
+    return _stt_groq(data_bytes, ext) or _stt_gemini(data_bytes, ext) or None
+
+
+def start_read_wizard(chat_id):
+    STATE[chat_id] = {"step": "read_wait_voice", "data": {"type": "poem", "author": PEN_ALEFBA}}
+    bot.send_message(
+        chat_id,
+        "🎙 جناب بخت‌زاده عزیز، شعرتان را با صدای خودتان بخوانید و همین‌جا در بله ضبط کرده و بفرستید.\n"
+        "من گوش می‌دهم و آن را برایتان می‌نویسم. 🌿",
+        reply_markup=back_keyboard(),
+    )
+
+
+def handle_read_voice(chat_id, m, st, role):
+    # اول صدا را نگه می‌داریم تا هرگز گم نشود
+    try:
+        if m.content_type == "voice":
+            file_id, ext, ctype = m.voice.file_id, "ogg", "audio/ogg"
+        else:
+            file_id, ext, ctype = m.audio.file_id, "mp3", "audio/mpeg"
+        data_bytes = download_bale_file(file_id)
+        st["data"]["audio_url"] = upload_voice(data_bytes, ext, ctype)
+        st["data"]["voice_file_id"] = file_id
+    except Exception as e:
+        print("read voice download error:", e)
+        bot.send_message(chat_id, "دریافتِ صدا این‌بار نشد. لطفاً دوباره بخوانید و بفرستید. 🌿", reply_markup=back_keyboard())
+        return
+
+    bot.send_message(chat_id, "در حال شنیدن و نوشتنِ شعرِ شما… لطفاً چند لحظه صبر کنید. 🌿")
+    text = None
+    try:
+        text = transcribe_poem(data_bytes, ext)
+    except Exception as e:
+        print("transcribe error:", e)
+
+    if text:
+        st["data"]["content"] = text
+        st["step"] = "read_review"
+        bot.send_message(chat_id, "📜 شعرِ شما را این‌طور شنیدم:\n\n" + text + "\n\n———\nآیا درست است؟", reply_markup=read_review_keyboard())
+    else:
+        # تورِ نجات: متن درنیامد، ولی صدا محفوظ است → به‌صورت «آوا» ثبت می‌شود
+        st["data"]["type"] = "voice"
+        st["step"] = "voice_wait_title"
+        bot.send_message(
+            chat_id,
+            "متنِ شعر این‌بار درنیامد، ولی نگران نباشید؛ صدای شما محفوظ است. 🌿\n"
+            "می‌توانید همین صدا را به‌عنوان «آوا» ثبت کنیم. لطفاً یک «عنوان» برایش بنویسید\n"
+            "(یا برای خواندنِ دوباره، «🏠 بازگشت به منو» را بزنید):",
+            reply_markup=back_keyboard(),
+        )
+
+
+def handle_read_wizard(chat_id, text, st, role):
+    step = st["step"]
+    if step == "read_wait_voice":
+        bot.send_message(chat_id, "لطفاً شعر را با صدای خودتان بخوانید و به‌صورت «ویس» بفرستید. 🎙", reply_markup=back_keyboard())
+    elif step == "read_review":
+        if text == READ_OK:
+            st["step"] = "poem_title"
+            bot.send_message(chat_id, "بسیار خوب 🌸\nاکنون «عنوان یا سرآغاز» شعر را بنویسید.\n(اگر عنوان ندارد، بنویسید: بدون عنوان)", reply_markup=back_keyboard())
+        elif text == READ_REDO:
+            start_read_wizard(chat_id)
+        else:
+            bot.send_message(chat_id, "«✅ بله، درست است» یا «🔁 دوباره می‌خوانم» را انتخاب کنید.", reply_markup=read_review_keyboard())
+
+
 @bot.message_handler(content_types=["photo", "voice", "audio", "document", "video"])
 def on_media(m):
     chat_id = m.chat.id
@@ -716,6 +872,9 @@ def on_media(m):
     st = STATE.get(chat_id)
     step = st.get("step", "") if st else ""
 
+    if m.content_type in ("voice", "audio") and step == "read_wait_voice":
+        handle_read_voice(chat_id, m, st, role)
+        return
     if m.content_type == "photo" and step == "img_wait_photo":
         handle_image_photo(chat_id, m, st, role)
         return
@@ -770,8 +929,14 @@ def on_text(m):
         if step.startswith("img_") or step.startswith("voice_"):
             handle_media_wizard(chat_id, text, st, role)
             return
+        if step.startswith("read_"):
+            handle_read_wizard(chat_id, text, st, role)
+            return
 
     # انتخاب از منوی اصلی
+    if text == BTN_READ:
+        start_read_wizard(chat_id)
+        return
     if text == BTN_POEM:
         start_poem_wizard(chat_id)
         return
