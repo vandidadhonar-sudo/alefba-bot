@@ -65,6 +65,7 @@ BTN_RESTART = "🔄 از نو"
 
 BTN_READ   = "🎙 خواندنِ شعر با صدا"
 READ_OK    = "✅ بله، درست است"
+READ_EDIT  = "✏️ اصلاح متن"
 READ_REDO  = "🔁 دوباره می‌خوانم"
 VOICE_YES  = "✅ بله، صدای من هم باشد"
 VOICE_NO   = "❌ فقط متنِ شعر"
@@ -373,7 +374,8 @@ def handle_poem_wizard(chat_id, text, st, role):
             show_preview(chat_id, data)
         elif text == EDIT_TEXT:
             st["step"] = "edit_field_text"
-            bot.send_message(chat_id, "متن جدید شعر را بنویسید:", reply_markup=back_keyboard())
+            bot.send_message(chat_id, "برای اصلاح، متنِ پایین را کپی کنید، اصلاح کنید و بفرستید (نیازی به نوشتنِ دوباره از اول نیست): 👇", reply_markup=back_keyboard())
+            bot.send_message(chat_id, data.get("content", ""))
         elif text == EDIT_TITLE:
             st["step"] = "edit_field_title"
             bot.send_message(chat_id, "عنوان جدید را بنویسید:", reply_markup=back_keyboard())
@@ -753,6 +755,7 @@ def ask_voice_keyboard():
 def read_review_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(READ_OK)
+    kb.row(READ_EDIT)
     kb.row(READ_REDO)
     kb.row(BTN_HOME)
     return kb
@@ -910,10 +913,27 @@ def handle_read_wizard(chat_id, text, st, role):
         if text == READ_OK:
             st["step"] = "poem_title"
             bot.send_message(chat_id, "بسیار خوب 🌸\nاکنون «عنوان یا سرآغاز» شعر را بنویسید.\n(اگر عنوان ندارد، بنویسید: بدون عنوان)", reply_markup=back_keyboard())
+        elif text == READ_EDIT:
+            st["step"] = "read_edit_text"
+            bot.send_message(
+                chat_id,
+                "برای اصلاح، متنِ پایین را لمسِ طولانی کنید و «کپی» را بزنید؛ سپس در کادرِ پیام بچسبانید، "
+                "کلماتِ اشتباه را درست کنید و بفرستید. 👇\n(نیازی به نوشتنِ دوباره از اول نیست.)",
+                reply_markup=back_keyboard(),
+            )
+            bot.send_message(chat_id, st["data"].get("content", ""))
         elif text == READ_REDO:
             start_read_wizard(chat_id)
         else:
-            bot.send_message(chat_id, "«✅ بله، درست است» را بزنید، یا دوباره بخوانید و بفرستید.", reply_markup=read_review_keyboard())
+            bot.send_message(chat_id, "«✅ بله، درست است» را بزنید، یا «✏️ اصلاح متن»، یا دوباره بخوانید و بفرستید.", reply_markup=read_review_keyboard())
+    elif step == "read_edit_text":
+        st["data"]["content"] = text
+        st["step"] = "read_review"
+        bot.send_message(
+            chat_id,
+            "📜 متنِ اصلاح‌شده:\n\n" + text + "\n\n———\nحالا درست است؟",
+            reply_markup=read_review_keyboard(),
+        )
     elif step == "read_failed":
         if text == SAVE_AS_AVA:
             try:
@@ -961,7 +981,7 @@ def on_media(m):
     st = STATE.get(chat_id)
     step = st.get("step", "") if st else ""
 
-    if m.content_type in ("voice", "audio") and step in ("read_wait_voice", "read_got_voice", "read_review", "read_failed"):
+    if m.content_type in ("voice", "audio") and step in ("read_wait_voice", "read_got_voice", "read_review", "read_edit_text", "read_failed"):
         handle_read_voice(chat_id, m, st, role)
         return
     if m.content_type == "photo" and step == "img_wait_photo":
