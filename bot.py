@@ -69,6 +69,9 @@ READ_REDO  = "🔁 دوباره می‌خوانم"
 VOICE_YES  = "✅ بله، صدای من هم باشد"
 VOICE_NO   = "❌ فقط متنِ شعر"
 SAVE_AS_AVA = "🎤 همین صدا در آواها بماند"
+READ_DONE   = "✅ ضبط کامل شد"
+AVA_YES     = "✅ بله، در آواها هم باشد"
+AVA_NO      = "❌ خیر، همین کافی است"
 
 EDIT_TEXT  = "✏️ متن شعر"
 EDIT_TITLE = "✏️ عنوان"
@@ -340,11 +343,22 @@ def handle_poem_wizard(chat_id, text, st, role):
 
     elif step == "poem_preview":
         if text == BTN_CONFIRM:
-            if data.get("voice_bytes"):
-                st["step"] = "poem_ask_voice"
-                bot.send_message(chat_id, "صدای خوانشِ شما هم زیرِ شعر در سایت منتشر شود؟", reply_markup=ask_voice_keyboard())
-            else:
-                publish_poem(chat_id, data, role)
+            has_voice = bool(data.get("voice_bytes"))
+            stash = None
+            if has_voice:
+                stash = {
+                    "type": "voice",
+                    "author": data.get("author"),
+                    "voice_bytes": data.get("voice_bytes"),
+                    "voice_ext": data.get("voice_ext"),
+                    "voice_ctype": data.get("voice_ctype"),
+                    "voice_file_id": data.get("voice_file_id"),
+                }
+            data.pop("audio_url", None)   # شعر به‌صورت متن منتشر می‌شود
+            publish_poem(chat_id, data, role)
+            if has_voice:
+                STATE[chat_id] = {"step": "ask_ava", "data": stash}
+                bot.send_message(chat_id, "این صدای ضبط‌شدهٔ شما را در بخشِ «آواها» هم منتشر کنیم؟", reply_markup=ask_ava_keyboard())
         elif text == BTN_EDIT:
             st["step"] = "poem_edit_menu"
             bot.send_message(chat_id, "کدام بخش را می‌خواهید اصلاح کنید؟", reply_markup=edit_keyboard())
@@ -352,22 +366,6 @@ def handle_poem_wizard(chat_id, text, st, role):
             start_poem_wizard(chat_id)
         else:
             show_preview(chat_id, data)
-
-    elif step == "poem_ask_voice":
-        if text == VOICE_YES:
-            try:
-                data["audio_url"] = upload_voice(
-                    data["voice_bytes"], data.get("voice_ext", "ogg"), data.get("voice_ctype", "audio/ogg"))
-            except Exception as e:
-                print("recitation upload error:", e)
-                data.pop("audio_url", None)
-                bot.send_message(chat_id, "آپلودِ صدا این‌بار نشد؛ شعر بدون صدا منتشر می‌شود. 🌿")
-            publish_poem(chat_id, data, role)
-        elif text == VOICE_NO:
-            data.pop("audio_url", None)
-            publish_poem(chat_id, data, role)
-        else:
-            bot.send_message(chat_id, "یکی از گزینه‌ها را انتخاب کنید:", reply_markup=ask_voice_keyboard())
 
     elif step == "poem_edit_menu":
         if text == EDIT_BACK:
@@ -768,6 +766,22 @@ def read_failed_keyboard():
     return kb
 
 
+def read_got_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(READ_DONE)
+    kb.row(READ_REDO)
+    kb.row(BTN_HOME)
+    return kb
+
+
+def ask_ava_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(AVA_YES)
+    kb.row(AVA_NO)
+    kb.row(BTN_HOME)
+    return kb
+
+
 def _stt_groq(data_bytes, ext):
     key = os.getenv("GROQ_API_KEY")
     if not key:
@@ -844,21 +858,31 @@ def handle_read_voice(chat_id, m, st, role):
     st["data"]["voice_ctype"] = ctype
     st["data"]["voice_file_id"] = file_id
 
+    st["step"] = "read_got_voice"
+    bot.send_message(
+        chat_id,
+        "صدای شما دریافت شد. 🌿\nخواندنِ شعر کامل شد؟\n(اگر اشتباه شد، کافی است دوباره بخوانید و بفرستید.)",
+        reply_markup=read_got_keyboard(),
+    )
+
+
+def do_transcribe(chat_id, st):
+    data = st["data"]
     bot.send_message(chat_id, "در حال شنیدن و نوشتنِ شعرِ شما… لطفاً چند لحظه صبر کنید. 🌿")
     text = None
     try:
-        text = transcribe_poem(data_bytes, ext)
+        text = transcribe_poem(data.get("voice_bytes"), data.get("voice_ext", "ogg"))
     except Exception as e:
         print("transcribe error:", e)
 
     if text:
-        st["data"]["content"] = text
+        data["content"] = text
         st["step"] = "read_review"
         bot.send_message(
             chat_id,
             "📜 شعرِ شما را این‌طور شنیدم:\n\n" + text + "\n\n———\n"
             "اگر درست است، «✅ بله، درست است» را بزنید.\n"
-            "اگر نه، همین حالا دوباره بخوانید و بفرستید. 🎙",
+            "اگر نه، دوباره بخوانید و بفرستید. 🎙",
             reply_markup=read_review_keyboard(),
         )
     else:
@@ -866,8 +890,7 @@ def handle_read_voice(chat_id, m, st, role):
         bot.send_message(
             chat_id,
             "متنِ شعر این‌بار درنیامد. 🌿\n"
-            "می‌توانید همین حالا دوباره بخوانید و بفرستید؛ یا اگر خوانشتان خوب بود، "
-            "همین صدا را در بخشِ «آواها» نگه داریم.",
+            "می‌توانید دوباره بخوانید و بفرستید؛ یا اگر خوانشتان خوب بود، همین صدا را در بخشِ «آواها» نگه داریم.",
             reply_markup=read_failed_keyboard(),
         )
 
@@ -876,6 +899,13 @@ def handle_read_wizard(chat_id, text, st, role):
     step = st["step"]
     if step == "read_wait_voice":
         bot.send_message(chat_id, "لطفاً شعر را با صدای خودتان بخوانید و به‌صورت «ویس» بفرستید. 🎙", reply_markup=back_keyboard())
+    elif step == "read_got_voice":
+        if text == READ_DONE:
+            do_transcribe(chat_id, st)
+        elif text == READ_REDO:
+            start_read_wizard(chat_id)
+        else:
+            bot.send_message(chat_id, "«✅ ضبط کامل شد» را بزنید، یا دوباره بخوانید و بفرستید. 🎙", reply_markup=read_got_keyboard())
     elif step == "read_review":
         if text == READ_OK:
             st["step"] = "poem_title"
@@ -902,6 +932,25 @@ def handle_read_wizard(chat_id, text, st, role):
             bot.send_message(chat_id, "دوباره بخوانید و بفرستید، یا یکی از گزینه‌ها را انتخاب کنید.", reply_markup=read_failed_keyboard())
 
 
+def handle_ask_ava(chat_id, text, st, role):
+    if text == AVA_YES:
+        try:
+            st["data"]["audio_url"] = upload_voice(
+                st["data"]["voice_bytes"], st["data"].get("voice_ext", "ogg"), st["data"].get("voice_ctype", "audio/ogg"))
+        except Exception as e:
+            print("ask_ava upload error:", e)
+            STATE.pop(chat_id, None)
+            bot.send_message(chat_id, "ثبتِ صدا در آواها این‌بار نشد؛ ولی شعرتان منتشر شده است. 🌿", reply_markup=main_keyboard(role))
+            return
+        st["step"] = "voice_wait_title"
+        bot.send_message(chat_id, "بسیار خوب. یک «عنوان» برای این آوا بنویسید:", reply_markup=back_keyboard())
+    elif text == AVA_NO:
+        STATE.pop(chat_id, None)
+        bot.send_message(chat_id, "بسیار خوب، تمام شد. سپاس از شما جناب بخت‌زاده. 🌷", reply_markup=main_keyboard(role))
+    else:
+        bot.send_message(chat_id, "«بله» یا «خیر» را انتخاب کنید:", reply_markup=ask_ava_keyboard())
+
+
 @bot.message_handler(content_types=["photo", "voice", "audio", "document", "video"])
 def on_media(m):
     chat_id = m.chat.id
@@ -912,7 +961,7 @@ def on_media(m):
     st = STATE.get(chat_id)
     step = st.get("step", "") if st else ""
 
-    if m.content_type in ("voice", "audio") and step in ("read_wait_voice", "read_review", "read_failed"):
+    if m.content_type in ("voice", "audio") and step in ("read_wait_voice", "read_got_voice", "read_review", "read_failed"):
         handle_read_voice(chat_id, m, st, role)
         return
     if m.content_type == "photo" and step == "img_wait_photo":
@@ -971,6 +1020,9 @@ def on_text(m):
             return
         if step.startswith("read_"):
             handle_read_wizard(chat_id, text, st, role)
+            return
+        if step == "ask_ava":
+            handle_ask_ava(chat_id, text, st, role)
             return
 
     # انتخاب از منوی اصلی
